@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir:*)",
+      "Bash(source:*)",
+      "Bash(python3:*)",
+      "Bash(timeout 30 python3 main.py \"Acme Corp\" \"cncf\")",
+      "Bash(timeout 40 python3 main.py \"Acme Corp\" \"cncf\")"
+    ],
+    "deny": []
+  }
+}

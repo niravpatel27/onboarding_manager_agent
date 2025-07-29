@@ -1,0 +1,8 @@
+# Core framework
+agno>=1.0.0
+
+# Async support (if not included with your Python version)
+aiohttp>=3.9.0
+
+# For SQLite async support (used by stub services)
+aiosqlite>=0.17.0
