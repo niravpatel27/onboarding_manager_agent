@@ -31,6 +31,7 @@ The system processes contacts in batches, includes retry logic with exponential 
 ### Prerequisites
 
 - Python 3.9+
+- Node.js 14+ (for MCP SQLite server)
 - `agno` framework
 - SQLite (included with Python)
 - Environment variables for production (see Configuration section)
@@ -46,8 +47,11 @@ cd onboarding_manager_agent
 python3 -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# Install dependencies (once requirements.txt is created)
-# pip install -r requirements.txt
+# Install Python dependencies
+pip install -r requirements.txt
+
+# Install Node.js dependencies (for MCP SQLite server)
+npm install
 ```
 
 ### Running the Application
@@ -84,7 +88,8 @@ onboarding_manager_agent/
 │   │   └── events.py
 │   ├── tools/                     # External integrations
 │   │   ├── api_clients/           # API client implementations
-│   │   └── mcp/                   # Database tools
+│   │   ├── mcp_client.py          # MCP client implementation
+│   │   └── mcp_database.py        # MCP database abstraction
 │   ├── config/                    # Configuration
 │   │   └── settings.py
 │   ├── utils/                     # Utilities
@@ -97,8 +102,60 @@ onboarding_manager_agent/
 ├── config.py                      # Simple config for stubs
 ├── trace_workflow.py              # Natural workflow tracing
 ├── example.py                     # Example showing full structure
+├── package.json                   # Node.js dependencies for MCP
+├── requirements.txt               # Python dependencies
 └── CLAUDE.md                      # AI assistant guidelines
 ```
+
+## Database Implementation (MCP)
+
+This project uses the **Model Context Protocol (MCP)** for all database operations. MCP is a standardized protocol that enables AI assistants to interact with external tools and data sources through a consistent interface.
+
+### MCP Architecture
+
+```
+┌─────────────────┐
+│  DatabaseAgent  │
+└────────┬────────┘
+         │
+┌────────▼────────────┐
+│ OnboardingDatabase  │
+│    ToolsMCP         │
+└────────┬────────────┘
+         │
+┌────────▼────────────┐
+│ MCPDatabaseOperations│
+└────────┬────────────┘
+         │
+┌────────▼────────────┐
+│    MCPClient        │
+└────────┬────────────┘
+         │ MCP Protocol
+┌────────▼────────────┐
+│ MCP SQLite Server   │
+│ (External Process)  │
+└─────────────────────┘
+```
+
+### MCP Setup
+
+1. **Install dependencies:**
+   ```bash
+   # Install Node.js dependencies (for MCP SQLite server)
+   npm install
+   
+   # Install Python dependencies
+   pip install -r requirements.txt
+   ```
+
+2. The MCP SQLite server will be automatically spawned when the application runs.
+
+### Benefits of MCP
+
+- **Protocol-based communication**: Standardized interface for database operations
+- **Process isolation**: Database runs in a separate process for better security
+- **Tool discovery**: Can dynamically discover available database operations
+- **Future-proof**: Easy to swap database backends without changing application code
 
 ## How It Works
 
@@ -248,6 +305,10 @@ The system includes built-in monitoring capabilities:
 2. **Authentication Failures**: Verify API tokens are valid and not expired
 3. **Database Errors**: Ensure SQLite database has proper permissions
 4. **Batch Processing Failures**: Check logs for specific contact processing errors
+5. **MCP Connection Issues**: 
+   - Ensure Node.js is installed (`node --version`)
+   - Check that `npx` is available in PATH
+   - Verify MCP SQLite server is installed (`npm list mcp-sqlite`)
 
 ### Debug Mode
 

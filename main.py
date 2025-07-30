@@ -7,7 +7,7 @@ import logging
 from contextlib import asynccontextmanager
 from agno.agent import Agent, Function, Message
 from agno.models.openai import OpenAIChat
-from src.tools.mcp_database_abstraction import OnboardingDatabaseTools
+from src.tools.mcp_database import OnboardingDatabaseToolsMCP
 import os
 from dotenv import load_dotenv
 from enhanced_logger import onboarding_logger as workflow_logger
@@ -70,7 +70,7 @@ class DatabaseAgent(Agent):
     """Agent responsible for database operations via MCP"""
     
     def __init__(self, mcp_server_type: str = "sqlite"):
-        self.db_tools = OnboardingDatabaseTools()
+        self.db_tools = OnboardingDatabaseToolsMCP()
         super().__init__(
             name="DatabaseManager",
             model=OpenAIChat(id="gpt-4o-mini"),

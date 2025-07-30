@@ -1,0 +1,12 @@
+{
+  "name": "onboarding-manager-mcp",
+  "version": "1.0.0",
+  "description": "MCP server dependencies for onboarding manager",
+  "private": true,
+  "devDependencies": {
+    "mcp-sqlite": "latest"
+  },
+  "scripts": {
+    "mcp-sqlite": "npx mcp-sqlite ./local_onboarding.db"
+  }
+}
