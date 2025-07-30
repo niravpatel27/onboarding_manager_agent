@@ -1,5 +1,5 @@
 """
-Real MCP Client implementation using the Model Context Protocol
+Real MCP Client implementation using the Model Context Protocol with proper CRUD tools
 """
 
 import asyncio
@@ -45,16 +45,6 @@ class RealMCPClient:
                     logger.info(f"Available tools: {[getattr(tool, 'name', str(tool)) for tool in tools]}")
                 else:
                     logger.info(f"Available tools: {tools}")
-                
-                # Get available resources (optional - not all servers support this)
-                try:
-                    resources = await session.list_resources()
-                    if hasattr(resources, '__iter__'):
-                        logger.info(f"Available resources: {[getattr(r, 'uri', str(r)) for r in resources]}")
-                    else:
-                        logger.info(f"Available resources: {resources}")
-                except Exception as e:
-                    logger.debug(f"Server does not support list_resources: {e}")
     
     async def disconnect(self):
         """Disconnect from the MCP server"""
@@ -65,9 +55,6 @@ class RealMCPClient:
     
     async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Call a tool on the MCP server"""
-        if not self.session:
-            await self.connect()
-        
         logger.debug(f"Calling tool: {tool_name} with args: {arguments}")
         
         # Use stdio client context manager for each operation
@@ -86,61 +73,70 @@ class RealMCPClient:
                 try:
                     content = result.content
                     if isinstance(content, list) and len(content) > 0:
-                        return {"status": "success", "data": content[0].text}
+                        # Handle text content
+                        if hasattr(content[0], 'text'):
+                            data = json.loads(content[0].text) if content[0].text else None
+                            return {"status": "success", "data": data}
+                        # Handle direct data
+                        return {"status": "success", "data": content[0]}
                     return {"status": "success", "data": content}
                 except Exception as e:
                     logger.error(f"Error parsing result: {e}")
                     return {"status": "error", "message": str(e)}
     
-    async def read_resource(self, uri: str) -> Dict[str, Any]:
-        """Read a resource from the MCP server"""
-        logger.debug(f"Reading resource: {uri}")
+    async def get_table_schema(self, table_name: str) -> Dict[str, Any]:
+        """Get table schema information using MCP tool"""
+        return await self.call_tool("get_table_schema", {"tableName": table_name})
+    
+    async def create_record(self, table: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a new record using MCP create_record tool"""
+        return await self.call_tool("create_record", {"table": table, "data": data})
+    
+    async def read_records(self, table: str, filter: Optional[Dict] = None, 
+                          order_by: Optional[str] = None, limit: Optional[int] = None) -> Dict[str, Any]:
+        """Read records using MCP read_records tool"""
+        args = {"table": table}
+        if filter:
+            args["filter"] = filter
+        if order_by:
+            args["orderBy"] = order_by
+        if limit:
+            args["limit"] = limit
         
-        async with stdio_client(self.server_params) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                
-                result = await session.read_resource(uri)
-                
-                if isinstance(result.contents, list) and len(result.contents) > 0:
-                    return {"status": "success", "data": result.contents[0].text}
-                return {"status": "success", "data": result.contents}
+        return await self.call_tool("read_records", args)
     
-    async def execute_query(self, query: str, params: Optional[List[Any]] = None) -> Dict[str, Any]:
-        """Execute a SQL query using the MCP server's query tool"""
-        args = {"sql": query}
+    async def update_records(self, table: str, updates: Dict[str, Any], 
+                           filter: Dict[str, Any]) -> Dict[str, Any]:
+        """Update records using MCP update_records tool"""
+        return await self.call_tool("update_records", {
+            "table": table,
+            "updates": updates,
+            "filter": filter
+        })
+    
+    async def delete_records(self, table: str, filter: Dict[str, Any]) -> Dict[str, Any]:
+        """Delete records using MCP delete_records tool"""
+        return await self.call_tool("delete_records", {"table": table, "filter": filter})
+    
+    async def execute_custom_sql(self, sql: str, params: Optional[List[Any]] = None) -> Dict[str, Any]:
+        """Execute custom SQL for complex queries only when CRUD tools aren't sufficient"""
+        args = {"sql": sql}
         if params:
-            args["values"] = params
-        return await self.call_tool("query", args)
-    
-    async def list_tables(self) -> Dict[str, Any]:
-        """List all tables in the database"""
-        # Try to read schema resource
-        try:
-            return await self.read_resource("sqlite:///schema")
-        except Exception as e:
-            # Fallback to query
-            return await self.execute_query(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-            )
-    
-    async def describe_table(self, table_name: str) -> Dict[str, Any]:
-        """Get table schema information"""
-        return await self.execute_query(f"PRAGMA table_info({table_name})")
+            args["params"] = params
+        return await self.call_tool("execute_custom_sql", args)
 
 
 class MCPDatabaseOperations:
     """
-    High-level database operations using the real MCP client.
-    This replaces direct SQL with MCP tool calls.
+    High-level database operations using the real MCP client with proper CRUD tools.
     """
     
     def __init__(self, db_path: str = "./local_onboarding.db"):
         self.client = RealMCPClient(db_path)
     
     async def initialize_schema(self) -> Dict[str, Any]:
-        """Initialize the database schema"""
-        # Create tables using MCP query tool
+        """Initialize the database schema - only place where custom SQL is needed"""
+        # Create tables using custom SQL since MCP doesn't have create_table tool
         queries = [
             """
             CREATE TABLE IF NOT EXISTS onboarding_sessions (
@@ -193,7 +189,7 @@ class MCPDatabaseOperations:
         ]
         
         for query in queries:
-            result = await self.client.execute_query(query)
+            result = await self.client.execute_custom_sql(query)
             if result["status"] == "error":
                 return result
         
@@ -206,181 +202,24 @@ class MCPDatabaseOperations:
         ]
         
         for index in indexes:
-            await self.client.execute_query(index)
+            await self.client.execute_custom_sql(index)
         
         return {"status": "success", "message": "Schema initialized"}
     
-    async def create_onboarding_session(self, org_name: str, project_slug: str,
-                                       member_id: str, project_id: str) -> Dict[str, Any]:
-        """Create a new onboarding session"""
-        result = await self.client.execute_query(
-            """
-            INSERT INTO onboarding_sessions 
-            (organization_name, project_slug, member_id, project_id)
-            VALUES (?, ?, ?, ?)
-            """,
-            [org_name, project_slug, member_id, project_id]
-        )
-        
-        if result["status"] == "success":
-            # Get the inserted ID
-            id_result = await self.client.execute_query("SELECT last_insert_rowid()")
-            if id_result["status"] == "success":
-                data = json.loads(id_result["data"]) if isinstance(id_result["data"], str) else id_result["data"]
-                session_id = data[0]["last_insert_rowid()"] if data else None
-                return {
-                    "status": "success",
-                    "session_id": session_id,
-                    "message": f"Created onboarding session for {org_name} -> {project_slug}"
-                }
-        
-        return result
+    async def get_table_schema(self, table_name: str) -> Dict[str, Any]:
+        """Get table schema information"""
+        return await self.client.get_table_schema(table_name)
     
-    async def add_contact_to_session(self, session_id: int, contact: Dict) -> Dict[str, Any]:
-        """Add a contact to an onboarding session"""
-        result = await self.client.execute_query(
-            """
-            INSERT INTO contact_onboarding 
-            (session_id, contact_id, email, first_name, last_name, title, contact_type)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                session_id,
-                contact['contact_id'],
-                contact['email'],
-                contact.get('first_name'),
-                contact.get('last_name'),
-                contact.get('title'),
-                contact.get('contact_type')
-            ]
-        )
-        
-        if result["status"] == "success":
-            # Get the inserted ID
-            id_result = await self.client.execute_query("SELECT last_insert_rowid()")
-            if id_result["status"] == "success":
-                data = json.loads(id_result["data"]) if isinstance(id_result["data"], str) else id_result["data"]
-                contact_id = data[0]["last_insert_rowid()"] if data else None
-                return {
-                    "status": "success",
-                    "contact_onboarding_id": contact_id,
-                    "message": f"Added contact {contact['email']} to session"
-                }
-        
-        return result
+    async def create_record(self, table: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a new record"""
+        return await self.client.create_record(table, data)
     
-    async def update_contact_status(self, contact_id: int, updates: Dict[str, Any]) -> Dict[str, Any]:
-        """Update contact status fields"""
-        # Build UPDATE query dynamically
-        set_clauses = []
-        values = []
-        
-        for key, value in updates.items():
-            set_clauses.append(f"{key} = ?")
-            values.append(value)
-        
-        values.append(contact_id)
-        
-        query = f"""
-        UPDATE contact_onboarding 
-        SET {', '.join(set_clauses)}
-        WHERE id = ?
-        """
-        
-        result = await self.client.execute_query(query, values)
-        
-        # Log event if status update
-        if result["status"] == "success" and any(k.endswith('_status') for k in updates):
-            for key in updates:
-                if key.endswith('_status'):
-                    event_type = key.replace('_status', '')
-                    await self.client.execute_query(
-                        """
-                        INSERT INTO onboarding_events 
-                        (contact_onboarding_id, event_type, event_status, event_details)
-                        VALUES (?, ?, ?, ?)
-                        """,
-                        [contact_id, event_type, updates[key], json.dumps(updates)]
-                    )
-        
-        return result
+    async def read_records(self, table: str, filter: Optional[Dict] = None,
+                          order_by: Optional[str] = None, limit: Optional[int] = None) -> Dict[str, Any]:
+        """Read records from table"""
+        return await self.client.read_records(table, filter, order_by, limit)
     
-    async def update_session_statistics(self, session_id: int) -> Dict[str, Any]:
-        """Update session statistics"""
-        # Get statistics
-        stats_result = await self.client.execute_query(
-            """
-            SELECT 
-                COUNT(*) as total,
-                SUM(CASE WHEN overall_status = 'completed' THEN 1 ELSE 0 END) as successful,
-                SUM(CASE WHEN overall_status = 'failed' THEN 1 ELSE 0 END) as failed
-            FROM contact_onboarding
-            WHERE session_id = ?
-            """,
-            [session_id]
-        )
-        
-        if stats_result["status"] == "success":
-            data = json.loads(stats_result["data"]) if isinstance(stats_result["data"], str) else stats_result["data"]
-            stats = data[0] if data else {"total": 0, "successful": 0, "failed": 0}
-            
-            # Update session
-            return await self.client.execute_query(
-                """
-                UPDATE onboarding_sessions
-                SET total_contacts = ?, successful_contacts = ?, failed_contacts = ?
-                WHERE id = ?
-                """,
-                [stats["total"], stats["successful"], stats["failed"], session_id]
-            )
-        
-        return stats_result
-    
-    async def get_session_report(self, session_id: int) -> Dict[str, Any]:
-        """Generate comprehensive session report"""
-        # Get session details
-        session_result = await self.client.execute_query(
-            "SELECT * FROM onboarding_sessions WHERE id = ?",
-            [session_id]
-        )
-        
-        # Get contacts
-        contacts_result = await self.client.execute_query(
-            """
-            SELECT * FROM contact_onboarding 
-            WHERE session_id = ? 
-            ORDER BY contact_type, email
-            """,
-            [session_id]
-        )
-        
-        # Get type summary
-        summary_result = await self.client.execute_query(
-            """
-            SELECT 
-                contact_type,
-                COUNT(*) as total,
-                SUM(CASE WHEN overall_status = 'completed' THEN 1 ELSE 0 END) as successful
-            FROM contact_onboarding
-            WHERE session_id = ?
-            GROUP BY contact_type
-            """,
-            [session_id]
-        )
-        
-        # Parse results
-        report = {"status": "success", "report": {}}
-        
-        if session_result["status"] == "success":
-            data = json.loads(session_result["data"]) if isinstance(session_result["data"], str) else session_result["data"]
-            report["report"]["session"] = data[0] if data else None
-        
-        if contacts_result["status"] == "success":
-            data = json.loads(contacts_result["data"]) if isinstance(contacts_result["data"], str) else contacts_result["data"]
-            report["report"]["contacts"] = data
-        
-        if summary_result["status"] == "success":
-            data = json.loads(summary_result["data"]) if isinstance(summary_result["data"], str) else summary_result["data"]
-            report["report"]["type_summary"] = data
-        
-        return report
+    async def update_records(self, table: str, updates: Dict[str, Any],
+                           filter: Dict[str, Any]) -> Dict[str, Any]:
+        """Update records in table"""
+        return await self.client.update_records(table, updates, filter)

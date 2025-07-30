@@ -74,27 +74,41 @@ class DatabaseAgent(Agent):
         super().__init__(
             name="DatabaseManager",
             model=OpenAIChat(id="gpt-4o-mini"),
-            instructions=f"""You manage all database operations through MCP's abstraction layer.
+            instructions=f"""You manage all database operations through MCP's CRUD tools.
             Your tasks:
             1. Initialize database schema if not exists
             2. Create and manage onboarding sessions
             3. Track contact onboarding progress
             4. Update statuses and log events
             5. Generate reports from stored data
-            6. Handle transactions for data consistency
             
-            IMPORTANT: When asked to "Add contact to onboarding session":
-            - Look at the message context which contains 'session_id' and 'contact' 
-            - You MUST call add_contact_to_session with BOTH parameters: 
-              - session_id (from context.session_id)
-              - contact (from context.contact - pass the entire contact dictionary)
-            - Do NOT call with just session_id
+            CRITICAL: ALWAYS return the EXACT JSON response from tool calls. Do NOT interpret or summarize.
             
-            The message will have context like: {{"session_id": 123, "contact": {{"email": "test@test.com", ...}}}}
-            You MUST call: add_contact_to_session(session_id=123, contact={{"email": "test@test.com", ...}})
+            When handling "Create new onboarding session":
+            - Look at context for org_name, project_slug, member_id, project_id
+            - Call create_onboarding_session with ALL parameters
+            - Return the COMPLETE response including session_id
             
-            Use the MCP abstraction methods - no SQL queries needed.
-            All database operations are handled through MCP's native capabilities.
+            IMPORTANT: When handling "Update contact status" requests:
+            - Look at the context for 'contact_id' and 'status_type'
+            - Based on status_type, call the appropriate method:
+              - "committee" -> update_contact_committee_status
+              - "slack" -> update_contact_slack_status  
+              - "email" -> update_contact_email_status
+              - "overall" -> update_overall_status
+            - Pass any additional_data as appropriate parameters
+            
+            Example: If context has {{"contact_id": 1, "status_type": "committee", "status": "success", "additional_data": {{"committee_id": "123"}}}}
+            You should call: update_contact_committee_status(contact_id=1, status="success", committee_id="123")
+            
+            When asked to "Add contact to onboarding session":
+            - You will see "Parameters to use:" followed by session_id and contact
+            - Parse the parameters section to get both values
+            - Call add_contact_to_session with BOTH parameters:
+              add_contact_to_session(session_id=<integer value>, contact=<dictionary value>)
+            - The contact parameter must be the full dictionary/JSON object provided
+            
+            All database operations use MCP's CRUD tools - no SQL queries.
             """,
             tools=[
                 Function.from_callable(self.db_tools.initialize),
@@ -368,12 +382,28 @@ class ProjectCommitteeAgent(Agent):
             2. "Get all committees for project X" - Use get_project_committees tool with project_id
                Returns: {"status": "success", "committees": [...], "count": N}
                
-            3. "Add contact to committee" - First check membership, then add if not already member
+            3. "Check if email is already in committee" - Use check_committee_membership tool
+               Parameters: project_id, committee_id, email
+               
+            4. "Add email to committee" - Use add_committee_member tool
+               CRITICAL: When you see "Add [email] to committee [committee_id]" in the message,
+               look for the Context section in the message which contains:
+               - project_id: Use this value
+               - committee_id: Use this value  
+               - member_data: Use this ENTIRE dictionary object
+               
+               Call add_committee_member with ALL THREE parameters:
+               add_committee_member(
+                   project_id=<value from context>,
+                   committee_id=<value from context>,
+                   member_data=<entire member_data dict from context>
+               )
             
             CRITICAL:
             - Return the EXACT JSON response from tools
             - Do NOT interpret or summarize
-            - When asked for committees, you MUST call get_project_committees with the project_id
+            - ALWAYS use the Context section when provided
+            - The member_data parameter MUST be the complete dictionary from the context
             """,
             tools=[
                 Function.from_callable(ProjectServiceTools.get_project_by_slug),
@@ -858,20 +888,34 @@ class OrchestratorAgent(Agent):
                     return {"status": "already_member", "committee_id": committee_id}
                 
                 # Add to committee
+                member_data = {
+                    "name": f"{contact['first_name']} {contact['last_name']}",
+                    "email": contact['email'],
+                    "organization": self.project_context.organization_name,
+                    "title": contact['title'],
+                    "role": contact['contact_type'],
+                    "join_date": datetime.now().isoformat()
+                }
+                
+                self.logger.info(f"Adding contact to committee with member_data: {member_data}")
+                
+                # Create a very explicit message for the agent
+                task_message = f"""Add member to committee using add_committee_member tool with these exact parameters:
+                
+project_id: {self.project_context.project_id}
+committee_id: {committee_id}
+member_data: {json.dumps(member_data)}
+
+Call the function exactly as: add_committee_member(project_id="{self.project_context.project_id}", committee_id="{committee_id}", member_data={json.dumps(member_data)})
+"""
+                
                 result = await self.delegate_to_agent(
                     self.committee_manager,
-                    f"Add {contact['email']} to committee {committee_id}",
+                    task_message,
                     {
                         "project_id": self.project_context.project_id,
                         "committee_id": committee_id,
-                        "member_data": {
-                            "name": f"{contact['first_name']} {contact['last_name']}",
-                            "email": contact['email'],
-                            "organization": self.project_context.organization_name,
-                            "title": contact['title'],
-                            "role": contact['contact_type'],
-                            "join_date": datetime.now().isoformat()
-                        }
+                        "member_data": member_data
                     }
                 )
                 
@@ -1112,7 +1156,15 @@ class OrchestratorAgent(Agent):
         """Delegate a task to a specific agent"""
         # Include context in the task message for better agent understanding
         if context:
-            task_with_context = f"{task}\n\nContext: {json.dumps(context, indent=2)}"
+            # Make context extremely clear for LLM agents
+            context_parts = []
+            for key, value in context.items():
+                if isinstance(value, dict):
+                    context_parts.append(f"{key}: {json.dumps(value)}")
+                else:
+                    context_parts.append(f"{key}: {value}")
+            
+            task_with_context = f"{task}\n\nParameters to use:\n" + "\n".join(context_parts)
         else:
             task_with_context = task
             
